@@ -1,0 +1,4 @@
+- insert:
+    - id: archived-session-delete
+      name: '@local/archived-session-delete'
+      config: {}

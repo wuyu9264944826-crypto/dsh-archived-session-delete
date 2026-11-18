@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Archived conversation delete",
+    "description": "Adds Delete conversation to an archived conversation's right-click menu, with a confirmation, and removes that conversation's stored log."
+  }
+}
