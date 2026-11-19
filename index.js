@@ -11,6 +11,11 @@
  * leftover row is a log-less row that the next list pull drops anyway. Doing it
  * the other way round would first publish the Session as an ordinary visible
  * row it can never open.
+ *
+ * "Still running" must mean work in progress, never "in memory". An archived
+ * conversation the user has opened stays materialized in the Host's Session
+ * store for the rest of the process; treating that as activity made exactly the
+ * conversations someone had looked at undeletable.
  */
 
 import { readdir, rm, stat } from 'node:fs/promises'
@@ -19,8 +24,12 @@ import { join } from 'node:path'
 
 /** Exact pathname the Client half posts to; it must not start with the `/api` bridge. */
 const ROUTE_PATH = '/plugin-api/archived-session/delete'
-/** A Session id is the branded `session-<uuid>` string; nothing else may name a directory. */
-const SESSION_ID = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+/**
+ * A Session id is one path segment: the `session-` prefix plus an id the store
+ * minted (a UUID, but short provisional ids such as `session-1` exist too).
+ * Separators are excluded, so no id can address a directory outside its group.
+ */
+const SESSION_ID = /^session-[0-9A-Za-z._-]{1,190}$/
 /** Request bodies carry one id; anything larger is not this route's request. */
 const MAX_BODY_BYTES = 4096
 const CORS_METHODS = 'POST, OPTIONS'
@@ -133,6 +142,41 @@ async function findSessionDirectories(sessionId) {
 }
 
 /**
+ * What still runs for one Session, asked the same way the archive path asks it
+ * (`workspace/session-activity`, plus the live Agent's own status). Only
+ * reported work refuses a delete: a running turn, subagents, owned jobs, active
+ * schedules. A materialized Session is the normal state of an archived
+ * conversation that has been opened, and is not activity.
+ * @param ctx - Host context carrying the Agent and registry services.
+ * @param sessionId - validated Session id.
+ * @returns the reported work kinds, empty when nothing runs.
+ */
+async function runningWork(ctx, sessionId) {
+  const kinds = new Set();
+  try {
+    const agent = ctx.get('agents')?.get(sessionId);
+    if (agent !== undefined && agent !== null && agent.status === 'running') kinds.add('turn');
+  } catch (error) {
+    // An absent Agent service means no running work is knowable here.
+  }
+  try {
+    const reported = await ctx.waterfall('workspace/session-activity', { sessionId }, () => Promise.resolve([]));
+    for (const entry of Array.isArray(reported) ? reported : []) {
+      kinds.add(entry !== null && typeof entry === 'object' && typeof entry.kind === 'string' ? entry.kind : 'other');
+    }
+  } catch (error) {
+    // A provider failure must not turn into a refusal; the log delete below is
+    // still guarded by the OS, which fails on an actually open log file.
+    try {
+      ctx.logger.warn(`archived-session-delete: activity providers failed for '${sessionId}': ${String(error)}`);
+    } catch (loggingError) {
+      // Logging must never decide the outcome.
+    }
+  }
+  return [...kinds];
+}
+
+/**
  * Delete one archived Session: its stored log, its Workspace slot, and its
  * archive-set entry.
  * @param ctx - Host context carrying the registry and the live Session store.
@@ -146,9 +190,9 @@ async function deleteArchivedSession(ctx, sessionId) {
   if (!registry.archivedSessionIds.includes(sessionId)) {
     return { status: 409, body: { ok: false, reason: 'not-archived' } };
   }
-  const live = ctx.get('sessions')?.get(sessionId);
-  if (live !== undefined) {
-    return { status: 409, body: { ok: false, reason: 'active' } };
+  const kinds = await runningWork(ctx, sessionId);
+  if (kinds.length > 0) {
+    return { status: 409, body: { ok: false, reason: 'active', kinds } };
   }
 
   let removed;
@@ -156,7 +200,14 @@ async function deleteArchivedSession(ctx, sessionId) {
     removed = await findSessionDirectories(sessionId);
     for (const directory of removed) await rm(directory, { recursive: true, force: true });
   } catch (error) {
-    return { status: 500, body: { ok: false, reason: 'unlink-failed', message: String(error) } };
+    const code = error !== null && typeof error === 'object' ? error.code : undefined;
+    // Windows reports an open log file as EPERM/EBUSY on the containing
+    // directory; that is a retryable state, not a corrupt store.
+    const locked = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+    return {
+      status: locked ? 409 : 500,
+      body: { ok: false, reason: locked ? 'locked' : 'unlink-failed', message: String(error) },
+    };
   }
 
   try {

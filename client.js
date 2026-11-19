@@ -22,8 +22,16 @@ window.__ModuleLoader__.load({
         'confirm.pending': 'Deleting…',
         'cancel': 'Cancel',
         'notice.deleted': 'Conversation deleted',
+        'kind.turn': 'a running turn',
+        'kind.subagent': 'subagents',
+        'kind.job': 'background jobs',
+        'kind.schedule': 'schedules',
+        'kind.other': 'unfinished work',
+        'listSeparator': ', ',
         'error.not-archived': 'This conversation is no longer archived.',
         'error.active': 'This conversation is still running.',
+        'error.activeKinds': 'This conversation still has work in progress ({kinds}). Stop it first, then delete.',
+        'error.locked': 'The conversation log is held open by another process. Retry in a moment, or restart Harness.',
         'error.unlink-failed': 'The conversation log could not be removed.',
         'error.bookkeeping-failed': 'The log was removed, but its workspace entry could not be cleaned up.',
         'error.origin-refused': 'This page is not allowed to delete conversations.',
@@ -41,8 +49,16 @@ window.__ModuleLoader__.load({
         'confirm.pending': '正在删除…',
         'cancel': '取消',
         'notice.deleted': '对话已删除',
+        'kind.turn': '正在进行的回合',
+        'kind.subagent': '子代理',
+        'kind.job': '后台作业',
+        'kind.schedule': '定时任务',
+        'kind.other': '未完成的任务',
+        'listSeparator': '、',
         'error.not-archived': '该对话已不在归档中。',
         'error.active': '该对话仍在运行。',
+        'error.activeKinds': '该对话仍有任务在进行（{kinds}），请先停止后再删除。',
+        'error.locked': '该对话的日志文件正被其它进程占用，请稍后重试，或重启 Harness 后再删。',
         'error.unlink-failed': '无法删除该对话的本地记录。',
         'error.bookkeeping-failed': '记录已删除，但工作区条目未能清理。',
         'error.origin-refused': '当前页面无权删除对话。',
@@ -137,7 +153,12 @@ window.__ModuleLoader__.load({
       const reason = body !== null && typeof body === 'object' && typeof body.reason === 'string'
         ? body.reason
         : 'http-' + String(response.status);
-      throw withReason(new Error(reason), reason);
+      const failure = withReason(new Error(reason), reason);
+      // The Host names what still runs, so the dialog can say which work to stop.
+      failure.kinds = body !== null && typeof body === 'object' && Array.isArray(body.kinds)
+        ? body.kinds.filter(kind => typeof kind === 'string')
+        : [];
+      throw failure;
     }
 
     /** Attach the Host's machine-readable reason to a failure. */
@@ -147,14 +168,33 @@ window.__ModuleLoader__.load({
       return wrapped;
     }
 
-    /** A localized sentence for one failure. */
+    /** Which work kinds the Host named, in the reader's language. */
+    const KIND_KEYS = {
+      turn: 'kind.turn',
+      subagent: 'kind.subagent',
+      job: 'kind.job',
+      schedule: 'kind.schedule',
+    };
+
+    /**
+     * A localized sentence for one failure.
+     * @param t - the active dictionary.
+     * @param error - the rejected reason from {@link requestDelete}.
+     * @returns the sentence to show in the dialog.
+     */
     function messageFor(t, error) {
       const reason = error !== null && typeof error === 'object' && typeof error.reason === 'string'
         ? error.reason
         : '';
       switch (reason) {
         case 'not-archived': return t('error.not-archived');
-        case 'active': return t('error.active');
+        case 'active': {
+          const kinds = error !== null && typeof error === 'object' && Array.isArray(error.kinds) ? error.kinds : [];
+          if (kinds.length === 0) return t('error.active');
+          const labels = kinds.map(kind => t(KIND_KEYS[kind] ?? 'kind.other'));
+          return t('error.activeKinds').replace('{kinds}', labels.join(t('listSeparator')));
+        }
+        case 'locked': return t('error.locked');
         case 'unlink-failed': return t('error.unlink-failed');
         case 'bookkeeping-failed': return t('error.bookkeeping-failed');
         case 'origin-refused': return t('error.origin-refused');

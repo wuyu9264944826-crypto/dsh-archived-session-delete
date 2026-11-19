@@ -1,6 +1,6 @@
 {
   "name": "@local/archived-session-delete",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Adds Delete conversation to the archived Session menu and removes that conversation's local log.",
